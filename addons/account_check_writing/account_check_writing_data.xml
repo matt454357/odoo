@@ -7,9 +7,17 @@
         </record>
 
         <record id="sequence_check_number" model="ir.sequence">
+            <field name="name">Check Journal Number</field>
+            <field name="code">check.number</field>
+            <field name="prefix">CHK/%(year)s/</field>
+            <field eval="4" name="padding"/>
+        </record>
+
+        <record id="seq_check_number" model="ir.sequence">
             <field name="name">Check Number</field>
             <field name="code">check.number</field>
             <field eval="4" name="padding"/>
-        </record>        
+        </record>
+        <function model="account.journal" name="configure_check_journal"/>
     </data>
 </openerp>

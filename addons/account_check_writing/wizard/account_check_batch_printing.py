@@ -2,7 +2,7 @@
 ##############################################################################
 #
 #    OpenERP, Open Source Management Solution
-#    Copyright (C) 2004-2010 Tiny SPRL (<http://tiny.be>).
+#    Copyright (C) 2004-Today OpenERP S.A. (<http://www.openerp.com>).
 #
 #    This program is free software: you can redistribute it and/or modify
 #    it under the terms of the GNU Affero General Public License as
@@ -19,56 +19,115 @@
 #
 ##############################################################################
 
+from openerp.osv import osv, fields
 from openerp.tools.translate import _
-from openerp.osv import fields, osv
+
+CHECK_LAYOUT = {
+    'top': 'account.print.check.top',
+    'middle': 'account.print.check.middle',
+    'bottom': 'account.print.check.bottom',
+}
 
 
-class account_check_write(osv.osv_memory):
+class account_check_write(osv.TransientModel):
+
     _name = 'account.check.write'
-    _description = 'Prin Check in Batch'
+    _description = 'Print Check in Batch'
 
     _columns = {
-        'check_number': fields.integer('Next Check Number', required=True, help="The number of the next check number to be printed."),
+        'check_number': fields.integer('Check Sequence Number', required=True,
+                help="This is the number of the first check in the batch-print."),
+        'force_number': fields.boolean('Overwrite Check Numbers',
+                help="If checked, it will reassign a new check number from given sequence to the check(s) even if check(s) already have a number."),
+        'force_overwrite': fields.boolean('Adjust Sequence',
+                help="Use this if the default check number above is different than the next paper check number.\n- If checked, it will consider the check number above as the new default sequence.\n- Uncheck this if you are printing an exceptional batch."),
     }
 
+    def _get_sequence(self, cr, uid, ids, tolerate_noid=False, context=None):
+        """
+        Generic Method to fetch ir.sequence from voucher journal.
+        also tolerate the no seuquence condition, if needed e.g. default_get
+        """
+        voucher_pool = self.pool.get('account.voucher')
+        sequence_id = False
+        journal_id = voucher_pool.browse(cr, uid, context['active_id'], context=context).journal_id
+        if journal_id.check_sequence_id:
+            sequence_id = journal_id.check_sequence_id.id
+        elif not journal_id and tolerate_noid:
+            #if journal has no sequence we can use generic check sequence.
+            ref, sequence_id = self.pool.get('ir.model.data').get_object_reference(cr, uid, 'account_check_writing', 'seq_check_number')
+        else:
+            raise osv.except_osv(_('Error!'), _("No check number sequence defined for the journal : %s") % (journal_id.name))
+        return sequence_id
+
     def _get_next_number(self, cr, uid, context=None):
-        dummy, sequence_id = self.pool.get('ir.model.data').get_object_reference(cr, uid, 'account_check_writing', 'sequence_check_number')
-        return self.pool.get('ir.sequence').read(cr, uid, [sequence_id], ['number_next'])[0]['number_next']
+        """
+        Method will generate new sequence form active_id journal sequence.
+        @return: next sequence number to be used.
+        """
+        num_next = False
+        if context == None:
+            context = {}
+        if context.get('active_id') and context.get('active_model'):
+            sequence_id = self._get_sequence(cr, uid, context.get('active_id'), tolerate_noid=True, context=context)
+            num_next = self.pool.get('ir.sequence').read(cr, uid, sequence_id, ['number_next'])['number_next']
+        return num_next
 
     _defaults = {
         'check_number': _get_next_number,
-   }
+        'force_overwrite': True,
+    }
+
+    def _check_journal(self, cr, uid, checks, context=None):
+        journals = [check.journal_id.id for check in checks]
+        for check in checks:
+            if check.journal_id.type != "bank":
+                raise osv.except_osv(_("Warning"), _("Cannot perform operation. Voucher Journal type has to be Bank and Cheques."))
+        if len(set(journals)) > 1:
+            raise osv.except_osv(_("Warning"), _("You cannot batch-print checks from different journals in order to respect each journals sequence."))
+        states = [check.state for check in checks]
+        if "draft" in states:
+            raise osv.except_osv(_("Warning"), _("You cannot print draft checks. You have to validate them first."))
+        return True
 
     def print_check_write(self, cr, uid, ids, context=None):
         if context is None:
             context = {}
-        voucher_obj = self.pool.get('account.voucher')
-        ir_sequence_obj = self.pool.get('ir.sequence')
-
-        #update the sequence to number the checks from the value encoded in the wizard
-        dummy, sequence_id = self.pool.get('ir.model.data').get_object_reference(cr, uid, 'account_check_writing', 'sequence_check_number')
-        increment = ir_sequence_obj.read(cr, uid, [sequence_id], ['number_increment'])[0]['number_increment']
-        new_value = self.browse(cr, uid, ids[0], context=context).check_number
-        ir_sequence_obj.write(cr, uid, sequence_id, {'number_next': new_value})
-
-        #validate the checks so that they get a number
+        voucher_pool = self.pool.get('account.voucher')
+        sequence_pool = self.pool.get('ir.sequence')
+        transient_record = self.browse(cr, uid, ids[0], context=context)
+        new_value = transient_record.check_number
         voucher_ids = context.get('active_ids', [])
-        for check in voucher_obj.browse(cr, uid, voucher_ids, context=context):
-            new_value += increment
-            if check.number:
-                raise osv.except_osv(_('Error!'),_("One of the printed check already got a number."))
-        voucher_obj.proforma_voucher(cr, uid, voucher_ids, context=context)
-
-        #update the sequence again (because the assignation using next_val was made during the same transaction of
-        #the first update of sequence)
-        ir_sequence_obj.write(cr, uid, sequence_id, {'number_next': new_value})
-
-        #print the checks
-        data = {
-            'id': voucher_ids and voucher_ids[0],
-            'ids': voucher_ids,
+        checks = voucher_pool.browse(cr, uid, voucher_ids, context=context)
+        self._check_journal(cr, uid, checks, context)
+        sequence = self._get_sequence(cr, uid, checks[0].id, context=context)
+        #save the current start of the squence needed in case of force number 
+        #and update back later when job is done, this to be consistant.
+        old_next_start = sequence_pool.read(cr, uid, sequence, ['number_next'], context)['number_next']
+        #update sequence with force number for consistant numbering.
+        sequence_pool.write(cr, uid, sequence, {'number_next': new_value}, context=context)
+        #again fetch the increment and next number to be used in check number assigment.
+        requence_rec = sequence_pool.read(cr, uid, sequence, ['number_next', 'number_increment'], context=context)
+        new_next_start, increment = requence_rec['number_next'], requence_rec['number_increment']
+        for check in checks:
+            new_value = sequence_pool.next_by_id(cr, uid, sequence, context)
+            if check.check_number and not transient_record.force_number:
+                raise osv.except_osv(_('Error!'), _("At least one of the checks in the batch already has a check number. If you want to overwrite their number in this batch-print, select the corresponding checkbox."))
+            else:
+                voucher_pool.write(cr, uid, [check.id], {"check_number": new_value, "check_done": True}, context=context)
+                new_next_start += increment
+        up_number = new_next_start if transient_record.force_overwrite else old_next_start
+        sequence_pool.write(cr, uid, sequence, {'number_next': up_number}, context=context)
+        check_layout = voucher_pool.browse(cr, uid, voucher_ids[0], context=context).company_id.check_layout or 'top'
+        return {
+            'type': 'ir.actions.report.xml',
+            'report_name': CHECK_LAYOUT[check_layout],
+            'datas': {
+                'model': 'account.voucher',
+                'ids': voucher_ids,
+                'report_type': 'pdf'
+            },
+            'nodestroy': True
         }
 
-        return self.pool['report'].get_action(
-            cr, uid, [], 'account_check_writing.report_check', data=data, context=context
-        )
+# vim:expandtab:smartindent:tabstop=4:softtabstop=4:shiftwidth=4:
