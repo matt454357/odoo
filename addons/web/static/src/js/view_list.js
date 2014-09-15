@@ -167,7 +167,7 @@ instance.web.ListView = instance.web.View.extend( /** @lends instance.web.ListVi
      * @returns {String} CSS style declaration
      */
     style_for: function (record) {
-        var style= '';
+        var len, style= '';
 
         var context = _.extend({}, record.attributes, {
             uid: this.session.uid,
@@ -522,7 +522,7 @@ instance.web.ListView = instance.web.View.extend( /** @lends instance.web.ListVi
                         self.dataset.index = 0;
                     }
                 } else if (self.dataset.index >= self.records.length) {
-                    self.dataset.index = 0;
+                    self.dataset.index = self.records.length ? 0 : null;
                 }
 
                 self.compute_aggregates();
@@ -1623,6 +1623,7 @@ instance.web.ListView.Groups = instance.web.Class.extend( /** @lends instance.we
                     self.setup_resequence_rows(list, dataset);
                 }).always(function() {
                     if (post_render) { post_render(); }
+                    self.view.trigger('view_list_rendered');
                 });
             });
         return $el;

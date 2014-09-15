@@ -41,7 +41,7 @@ This module supports the following:
     * Integration with payments workflow: checks are an integrated part of the payment workflow in OpenERP.
     * Comprehensive and accurate information displayed on stub: supplier's invoice number, void status, memo, suppresses invoices that are not paid with this check.
     """,
-    'website': 'http://www.openerp.com',
+    'website': 'https://www.odoo.com/page/accounting',
     'depends': ['account_voucher'],
     'data': [
         'wizard/account_check_batch_printing_view.xml',
