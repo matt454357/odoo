@@ -1854,7 +1854,8 @@ class BaseModel(object):
             pass
 
 
-    def _read_group_fill_results(self, cr, uid, domain, groupby, remaining_groupbys, aggregated_fields,
+    def _read_group_fill_results(self, cr, uid, domain, groupby, remaining_groupbys,
+                                 aggregated_fields, count_field,
                                  read_group_result, read_group_order=None, context=None):
         """Helper method for filling in empty groups for all possible values of
            the field being grouped by"""
@@ -1888,8 +1889,7 @@ class BaseModel(object):
                 result.append(left_side)
                 known_values[grouped_value] = left_side
             else:
-                count_attr = groupby + '_count'
-                known_values[grouped_value].update({count_attr: left_side[count_attr]})
+                known_values[grouped_value].update({count_field: left_side[count_field]})
         def append_right(right_side):
             grouped_value = right_side[0]
             if not grouped_value in known_values:
@@ -2134,12 +2134,13 @@ class BaseModel(object):
             count_field = groupby_fields[0] if len(groupby_fields) >= 1 else '_'
         else:
             count_field = '_'
+        count_field += '_count'
 
         prefix_terms = lambda prefix, terms: (prefix + " " + ",".join(terms)) if terms else ''
         prefix_term = lambda prefix, term: ('%s %s' % (prefix, term)) if term else ''
 
         query = """
-            SELECT min(%(table)s.id) AS id, count(%(table)s.id) AS %(count_field)s_count %(extra_fields)s
+            SELECT min(%(table)s.id) AS id, count(%(table)s.id) AS %(count_field)s %(extra_fields)s
             FROM %(from)s
             %(where)s
             %(groupby)s
@@ -2179,7 +2180,7 @@ class BaseModel(object):
             # method _read_group_fill_results need to be completely reimplemented
             # in a sane way 
             result = self._read_group_fill_results(cr, uid, domain, groupby_fields[0], groupby[len(annotated_groupbys):],
-                                                       aggregated_fields, result, read_group_order=order,
+                                                       aggregated_fields, count_field, result, read_group_order=order,
                                                        context=context)
         return result
 
@@ -2304,7 +2305,7 @@ class BaseModel(object):
                 _schema.debug("Table '%s': column '%s': dropped NOT NULL constraint",
                               self._table, column['attname'])
 
-    def _save_constraint(self, cr, constraint_name, type):
+    def _save_constraint(self, cr, constraint_name, type, definition):
         """
         Record the creation of a constraint for this model, to make it possible
         to delete it later when the module is uninstalled. Type can be either
@@ -2316,19 +2317,26 @@ class BaseModel(object):
             return
         assert type in ('f', 'u')
         cr.execute("""
-            SELECT 1 FROM ir_model_constraint, ir_module_module
+            SELECT type, definition FROM ir_model_constraint, ir_module_module
             WHERE ir_model_constraint.module=ir_module_module.id
                 AND ir_model_constraint.name=%s
                 AND ir_module_module.name=%s
             """, (constraint_name, self._module))
-        if not cr.rowcount:
+        constraints = cr.dictfetchone()
+        if not constraints:
             cr.execute("""
                 INSERT INTO ir_model_constraint
-                    (name, date_init, date_update, module, model, type)
+                    (name, date_init, date_update, module, model, type, definition)
                 VALUES (%s, now() AT TIME ZONE 'UTC', now() AT TIME ZONE 'UTC',
                     (SELECT id FROM ir_module_module WHERE name=%s),
-                    (SELECT id FROM ir_model WHERE model=%s), %s)""",
-                    (constraint_name, self._module, self._name, type))
+                    (SELECT id FROM ir_model WHERE model=%s), %s, %s)""",
+                    (constraint_name, self._module, self._name, type, definition))
+        elif constraints['type'] != type or (definition and constraints['definition'] != definition):
+            cr.execute("""
+                UPDATE ir_model_constraint
+                SET date_update=now() AT TIME ZONE 'UTC', type=%s, definition=%s
+                WHERE name=%s AND module = (SELECT id FROM ir_module_module WHERE name=%s)""",
+                    (type, definition, constraint_name, self._module))
 
     def _save_relation_table(self, cr, relation_table):
         """
@@ -2731,7 +2739,7 @@ class BaseModel(object):
         """ Create the foreign keys recorded by _auto_init. """
         for t, k, r, d in self._foreign_keys:
             cr.execute('ALTER TABLE "%s" ADD FOREIGN KEY ("%s") REFERENCES "%s" ON DELETE %s' % (t, k, r, d))
-            self._save_constraint(cr, "%s_%s_fkey" % (t, k), 'f')
+            self._save_constraint(cr, "%s_%s_fkey" % (t, k), 'f', False)
         cr.commit()
         del self._foreign_keys
 
@@ -2844,9 +2852,14 @@ class BaseModel(object):
         for (key, con, _) in self._sql_constraints:
             conname = '%s_%s' % (self._table, key)
 
-            self._save_constraint(cr, conname, 'u')
-            cr.execute("SELECT conname, pg_catalog.pg_get_constraintdef(oid, true) as condef FROM pg_constraint where conname=%s", (conname,))
-            existing_constraints = cr.dictfetchall()
+            # using 1 to get result if no imc but one pgc
+            cr.execute("""SELECT definition, 1
+                          FROM ir_model_constraint imc
+                          RIGHT JOIN pg_constraint pgc
+                          ON (pgc.conname = imc.name)
+                          WHERE pgc.conname=%s
+                          """, (conname, ))
+            existing_constraints = cr.dictfetchone()
             sql_actions = {
                 'drop': {
                     'execute': False,
@@ -2870,14 +2883,15 @@ class BaseModel(object):
                 # constraint does not exists:
                 sql_actions['add']['execute'] = True
                 sql_actions['add']['msg_err'] = sql_actions['add']['msg_err'] % (sql_actions['add']['query'], )
-            elif unify_cons_text(con) not in [unify_cons_text(item['condef']) for item in existing_constraints]:
+            elif unify_cons_text(con) != existing_constraints['definition']:
                 # constraint exists but its definition has changed:
                 sql_actions['drop']['execute'] = True
-                sql_actions['drop']['msg_ok'] = sql_actions['drop']['msg_ok'] % (existing_constraints[0]['condef'].lower(), )
+                sql_actions['drop']['msg_ok'] = sql_actions['drop']['msg_ok'] % (existing_constraints['definition'] or '', )
                 sql_actions['add']['execute'] = True
                 sql_actions['add']['msg_err'] = sql_actions['add']['msg_err'] % (sql_actions['add']['query'], )
 
             # we need to add the constraint:
+            self._save_constraint(cr, conname, 'u', unify_cons_text(con))
             sql_actions = [item for item in sql_actions.values()]
             sql_actions.sort(key=lambda x: x['order'])
             for sql_action in [action for action in sql_actions if action['execute']]:
@@ -3155,6 +3169,9 @@ class BaseModel(object):
         elif self.env.field_todo(field):
             # field must be recomputed, do not prefetch records to recompute
             records -= self.env.field_todo(field)
+        elif not self._context.get('prefetch_fields', True):
+            # do not prefetch other fields
+            pass
         elif self._columns[field.name]._prefetch:
             # here we can optimize: prefetch all classic and many2one fields
             fnames = set(fname
@@ -3537,6 +3554,7 @@ class BaseModel(object):
         self.check_access_rule(cr, uid, ids, 'unlink', context=context)
         pool_model_data = self.pool.get('ir.model.data')
         ir_values_obj = self.pool.get('ir.values')
+        ir_attachment_obj = self.pool.get('ir.attachment')
         for sub_ids in cr.split_for_in_conditions(ids):
             cr.execute('delete from ' + self._table + ' ' \
                        'where id IN %s', (sub_ids,))
@@ -3557,6 +3575,13 @@ class BaseModel(object):
                     context=context)
             if ir_value_ids:
                 ir_values_obj.unlink(cr, uid, ir_value_ids, context=context)
+
+            # For the same reason, removing the record relevant to ir_attachment
+            # The search is performed with sql as the search method of ir_attachment is overridden to hide attachments of deleted records
+            cr.execute('select id from ir_attachment where res_model = %s and res_id in %s', (self._name, sub_ids))
+            ir_attachment_ids = [ir_attachment[0] for ir_attachment in cr.fetchall()]
+            if ir_attachment_ids:
+                ir_attachment_obj.unlink(cr, uid, ir_attachment_ids, context=context)
 
         # invalidate the *whole* cache, since the orm does not handle all
         # changes made in the database, like cascading delete!
@@ -5690,13 +5715,28 @@ class BaseModel(object):
 
                 # determine which fields have been modified
                 for name, oldval in values.iteritems():
+                    field = self._fields[name]
                     newval = record[name]
-                    if newval != oldval or getattr(newval, '_dirty', False):
-                        field = self._fields[name]
-                        result['value'][name] = field.convert_to_write(
-                            newval, record._origin, subfields.get(name),
-                        )
-                        todo.add(name)
+                    if field.type in ('one2many', 'many2many'):
+                        if newval != oldval or newval._dirty:
+                            # put new value in result
+                            result['value'][name] = field.convert_to_write(
+                                newval, record._origin, subfields.get(name),
+                            )
+                            todo.add(name)
+                        else:
+                            # keep result: newval may have been dirty before
+                            pass
+                    else:
+                        if newval != oldval:
+                            # put new value in result
+                            result['value'][name] = field.convert_to_write(
+                                newval, record._origin, subfields.get(name),
+                            )
+                            todo.add(name)
+                        else:
+                            # clean up result to not return another value
+                            result['value'].pop(name, None)
 
         # At the moment, the client does not support updates on a *2many field
         # while this one is modified by the user.
