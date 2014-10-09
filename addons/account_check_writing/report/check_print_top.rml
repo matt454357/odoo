@@ -2,7 +2,7 @@
 <document filename="Check (Top).pdf">
   <template pageSize="(612.0,792.0)" title="Check (Top)" author="Martin Simon" allowSplitting="20">
     <pageTemplate id="first">
-      <frame id="first" x1="13.0" y1="0.0" width="567" height="785"/>
+      <frame id="first" x1="13.0" y1="-5.0" width="567" height="785"/>
     </pageTemplate>
   </template>
   <stylesheet>
@@ -77,6 +77,7 @@
     <paraStyle name="Standard" fontName="Helvetica"/>
     <paraStyle name="P17" fontName="Helvetica" fontSize="9.0" leading="11"/>
     <paraStyle name="P18" fontName="Helvetica" fontSize="14.0" leading="11"/>
+    <paraStyle name="VERT" fontName="Helvetica" fontSize="1.0" leading="11"/>
     <paraStyle name="Heading" fontName="Helvetica" fontSize="14.0" leading="17" spaceBefore="12.0" spaceAfter="6.0"/>
     <paraStyle name="Text body" fontName="Helvetica" spaceBefore="0.0" spaceAfter="6.0"/>
     <paraStyle name="List" fontName="Helvetica" spaceBefore="0.0" spaceAfter="6.0"/>
@@ -171,23 +172,6 @@
             </tr>
           </blockTable>
           <blockTable colWidths="20.0,465.0,77.0" style="Table5">
-            <tr>
-              <td>
-                <para style="Standard">
-                  <font color="white"> </font>
-                </para>
-              </td>
-              <td>
-                <para style="Standard">
-                  <font color="white"> </font>
-                </para>
-              </td>
-              <td>
-                <para style="Standard">
-                  <font color="white"> </font>
-                </para>
-              </td>
-            </tr>
             <tr>
               <td>
                 <para style="Standard">
